@@ -27,6 +27,10 @@
 - The live check feature sends HTTP and HTTPS fetch requests to selected subdomains to determine if they respond within a 5-second timeout.
 - The UI updates dynamically to show progress and results.
 
+## Screenshot
+
+![App Screenshot](screenshot/screen.jpg)
+
 ## Limitations
 
 - Live check relies on client-side fetch with `no-cors` mode, which may not detect all live subdomains due to CORS and network restrictions.
