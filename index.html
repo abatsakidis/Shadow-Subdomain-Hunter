@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shadow Subdomain Hunter</title>
+<style>
+  body {
+    margin: 0; background: black; color: #00ff00; font-family: monospace; padding: 20px;
+  }
+  h1 { margin-bottom: 10px; font-weight: normal; }
+  input, button {
+    background: transparent; border: 1px solid currentColor; color: inherit;
+    padding: 8px 12px; font-size: 16px; font-family: monospace; margin: 5px 5px 10px 0;
+    transition: background-color 0.3s;
+  }
+  input:focus { outline: none; background-color: rgba(0,255,0,0.1); }
+  button:hover:enabled { background-color: rgba(0,255,0,0.15); cursor: pointer; }
+  button:disabled {
+    opacity: 0.4; cursor: not-allowed;
+  }
+  #output { max-height: 400px; overflow-y: auto; border: 1px solid currentColor; padding: 10px; border-radius: 4px; white-space: pre-wrap; }
+  .subdomain-item {
+    display: flex; align-items: center; margin: 2px 0;
+  }
+  .subdomain-item input[type=checkbox] {
+    margin-right: 10px;
+    transform: scale(1.2);
+  }
+  #filter {
+    width: 300px;
+  }
+  #liveCheckResults {
+    margin-top: 15px;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid #00ff00;
+    padding: 10px;
+    white-space: pre-wrap;
+  }
+  @media (max-width: 600px) {
+    input, button { width: 100%; box-sizing: border-box; margin: 5px 0; }
+    #filter { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<h1>&gt; Shadow Subdomain Hunter</h1>
+
+<label for="domain">Target Domain:</label><br />
+<input type="text" id="domain" placeholder="example.com" autocomplete="off" />
+<button id="scanBtn" onclick="findSubdomains()">Scan</button>
+<button onclick="downloadResults('txt')">Download TXT</button>
+<button onclick="downloadResults('csv')">Download CSV</button>
+
+<br />
+
+<label for="filter">Filter results:</label><br />
+<input type="text" id="filter" placeholder="Type to filter subdomains" oninput="debouncedFilter()" />
+
+<button id="liveCheckBtn" onclick="liveCheckSelected()">Check Selected Live</button>
+
+<div id="output"></div>
+
+<h3>Live Check Results:</h3>
+<div id="liveCheckResults">(Results will appear here)</div>
+
+<script>
+let allSubdomains = new Set();
+let displayedSubdomains = [];
+let checkedSubdomains = new Set();
+
+function isValidDomain(domain) {
+  const re = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,}$/i;
+  return re.test(domain);
+}
+
+async function fetchFromCrtSh(domain) {
+  try {
+    const res = await fetch(`https://crt.sh/?q=%25.${domain}&output=json`);
+    const data = await res.json();
+    const subs = new Set();
+    data.forEach(entry => {
+      const name = entry.common_name.toLowerCase();
+      if (name.endsWith(domain)) subs.add(name);
+    });
+    return subs;
+  } catch (e) { console.error("crt.sh error:", e); return new Set(); }
+}
+
+async function fetchFromHackerTarget(domain) {
+  try {
+    const res = await fetch(`https://api.hackertarget.com/hostsearch/?q=${domain}`);
+    const text = await res.text();
+    const subs = new Set();
+    text.split("\n").forEach(line => {
+      const [host] = line.split(",");
+      if (host && host.endsWith(domain)) subs.add(host.toLowerCase());
+    });
+    return subs;
+  } catch (e) { console.error("HackerTarget error:", e); return new Set(); }
+}
+
+async function fetchFromThreatCrowd(domain) {
+  try {
+    const res = await fetch(`https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=${domain}`);
+    const data = await res.json();
+    const subs = new Set();
+    if (data.subdomains) {
+      data.subdomains.forEach(sub => {
+        if (sub.endsWith(domain)) subs.add(sub.toLowerCase());
+      });
+    }
+    return subs;
+  } catch (e) { console.error("ThreatCrowd error:", e); return new Set(); }
+}
+
+async function fetchFromAnubis(domain) {
+  try {
+    const res = await fetch(`https://jldc.me/anubis/subdomains/${domain}`);
+    const data = await res.json();
+    const subs = new Set();
+    data.forEach(sub => {
+      if (sub.endsWith(domain)) subs.add(sub.toLowerCase());
+    });
+    return subs;
+  } catch (e) { console.error("Anubis error:", e); return new Set(); }
+}
+
+async function findSubdomains() {
+  const scanBtn = document.getElementById("scanBtn");
+  const liveCheckBtn = document.getElementById("liveCheckBtn");
+  scanBtn.disabled = true;
+  liveCheckBtn.disabled = true;
+
+  const domain = document.getElementById("domain").value.trim().toLowerCase();
+  const output = document.getElementById("output");
+  allSubdomains.clear();
+  checkedSubdomains.clear();
+  document.getElementById("liveCheckResults").textContent = "(Results will appear here)";
+
+  if (!domain) {
+    alert("Please enter a domain.");
+    scanBtn.disabled = false;
+    liveCheckBtn.disabled = false;
+    return;
+  }
+  if (!isValidDomain(domain)) {
+    alert("Invalid domain format.");
+    scanBtn.disabled = false;
+    liveCheckBtn.disabled = false;
+    return;
+  }
+
+  output.textContent = `> Searching subdomains for: ${domain}...\n\n`;
+
+  const sources = [
+    { name: "crt.sh", func: fetchFromCrtSh },
+    { name: "HackerTarget", func: fetchFromHackerTarget },
+    { name: "ThreatCrowd", func: fetchFromThreatCrowd },
+    { name: "Anubis", func: fetchFromAnubis }
+  ];
+
+  try {
+    // Parallel fetching
+    const promises = sources.map(s => s.func(domain).then(subs => ({ name: s.name, subs })));
+    const results = await Promise.all(promises);
+
+    for (const r of results) {
+      output.textContent += `> [${r.name}] Found ${r.subs.size} results.\n\n`;
+      r.subs.forEach(s => allSubdomains.add(s));
+    }
+
+    if (allSubdomains.size > 0) {
+      output.textContent += `> ✅ Total Unique Subdomains: ${allSubdomains.size}\n\n`;
+      displayedSubdomains = Array.from(allSubdomains).sort();
+      renderSubdomains(displayedSubdomains);
+    } else {
+      output.textContent += "> ❌ No subdomains found.\n";
+      document.getElementById("output").innerHTML = output.textContent;
+    }
+  } catch (err) {
+    output.textContent += "> ⚠️ Error during scanning.\n";
+    console.error(err);
+  } finally {
+    scanBtn.disabled = false;
+    liveCheckBtn.disabled = false;
+  }
+}
+
+function renderSubdomains(subdomains) {
+  const output = document.getElementById("output");
+  output.innerHTML = "";
+
+  if (subdomains.length === 0) {
+    output.textContent = "> No subdomains match the filter.";
+    return;
+  }
+
+  subdomains.forEach(sd => {
+    const div = document.createElement('div');
+    div.className = 'subdomain-item';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = checkedSubdomains.has(sd);
+    checkbox.onchange = () => {
+      if (checkbox.checked) checkedSubdomains.add(sd);
+      else checkedSubdomains.delete(sd);
+    };
+
+    const label = document.createElement('label');
+    label.textContent = sd;
+    label.style.userSelect = "text";
+
+    div.appendChild(checkbox);
+    div.appendChild(label);
+    output.appendChild(div);
+  });
+}
+
+// Debounce function helper
+function debounce(func, wait) {
+  let timeout;
+  return function(...args) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
+
+function applyFilter() {
+  const filterText = document.getElementById("filter").value.toLowerCase();
+  const filtered = Array.from(allSubdomains).filter(sd => sd.includes(filterText));
+  displayedSubdomains = filtered.sort();
+  checkedSubdomains.clear();
+  renderSubdomains(displayedSubdomains);
+}
+
+const debouncedFilter = debounce(applyFilter, 200);
+
+function downloadResults(format = 'txt') {
+  if (allSubdomains.size === 0) {
+    alert("No results to export.");
+    return;
+  }
+  let content = "";
+  if(format === 'csv'){
+    content = "Subdomain\n" + Array.from(allSubdomains).join("\n");
+  } else {
+    content = Array.from(allSubdomains).join("\n");
+  }
+
+  const blob = new Blob([content], { type: 'text/plain' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = format === 'csv' ? "subdomains.csv" : "subdomains.txt";
+  link.click();
+}
+
+async function checkSubdomainLive(subdomain) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    await fetch(`http://${subdomain}`, { mode: 'no-cors', signal: controller.signal });
+    clearTimeout(timeout);
+    return true;
+  } catch {}
+
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 5000);
+    await fetch(`https://${subdomain}`, { mode: 'no-cors', signal: controller2.signal });
+    clearTimeout(timeout2);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function liveCheckSelected() {
+  const scanBtn = document.getElementById("scanBtn");
+  const liveCheckBtn = document.getElementById("liveCheckBtn");
+  liveCheckBtn.disabled = true;
+  scanBtn.disabled = true;
+
+  const resultsDiv = document.getElementById("liveCheckResults");
+  if (checkedSubdomains.size === 0) {
+    alert("No subdomains selected for live check.");
+    liveCheckBtn.disabled = false;
+    scanBtn.disabled = false;
+    return;
+  }
+
+  resultsDiv.textContent = "> Checking live status of selected subdomains...\n";
+  const selected = Array.from(checkedSubdomains);
+  for (let i = 0; i < selected.length; i++) {
+    resultsDiv.textContent += `> [${i+1}/${selected.length}] Checking ${selected[i]}... `;
+    const alive = await checkSubdomainLive(selected[i]);
+    resultsDiv.textContent += alive ? "✅ Alive\n" : "❌ Dead\n";
+  }
+  resultsDiv.textContent += "\n> Live check completed.";
+  liveCheckBtn.disabled = false;
+  scanBtn.disabled = false;
+}
+</script>
+</body>
+</html>
